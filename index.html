@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>بازی جعبه — مکانیزم برداشتن و گذاشتن</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #0b1020;
+    font-family: system-ui, "Segoe UI", Tahoma, sans-serif;
+    user-select: none;
+  }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  /* ---------- نشانگر مرکز صفحه ---------- */
+  #crosshair {
+    position: fixed; left: 50%; top: 50%;
+    width: 10px; height: 10px; margin: -5px 0 0 -5px;
+    border: 2px solid rgba(255,255,255,.85);
+    border-radius: 50%;
+    pointer-events: none; z-index: 10;
+    box-shadow: 0 0 4px rgba(0,0,0,.7);
+    transition: border-color .12s, transform .12s;
+  }
+  #crosshair.target  { border-color: #4ade80; transform: scale(1.4); }
+  #crosshair.holding { border-color: #fbbf24; transform: scale(1.15); }
+
+  /* ---------- نوار راهنما ---------- */
+  #hint {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
+    background: rgba(8, 12, 24, .62);
+    color: #e8eefc;
+    padding: 10px 20px;
+    border-radius: 999px;
+    font-size: 14px;
+    letter-spacing: .2px;
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,.09);
+    pointer-events: none; z-index: 10;
+    white-space: nowrap;
+  }
+  #hint b {
+    color: #0b1020; background: #4ade80;
+    padding: 1px 7px; border-radius: 6px;
+    font-weight: 700; margin: 0 2px;
+  }
+
+  /* ---------- پرده شروع ---------- */
+  #overlay {
+    position: fixed; inset: 0; z-index: 20;
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle at 50% 40%, rgba(30,45,80,.85), rgba(5,8,18,.96));
+    backdrop-filter: blur(6px);
+    cursor: pointer;
+    transition: opacity .25s;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+
+  .card {
+    text-align: center; color: #e8eefc;
+    padding: 40px 52px;
+    border-radius: 22px;
+    background: rgba(12, 18, 34, .72);
+    border: 1px solid rgba(255,255,255,.1);
+    box-shadow: 0 24px 70px rgba(0,0,0,.6);
+    max-width: 520px;
+  }
+  .card h1 { font-size: 26px; margin-bottom: 10px; letter-spacing: .3px; }
+  .card p  { font-size: 15px; line-height: 2; color: #a9b6d4; }
+  .card .go {
+    display: inline-block; margin-top: 22px;
+    background: #4ade80; color: #06210f;
+    font-weight: 800; font-size: 16px;
+    padding: 12px 34px; border-radius: 12px;
+  }
+  .keys { margin-top: 18px; font-size: 14px; color: #8fa0c4; line-height: 2.1; }
+  .keys kbd {
+    background: #1c2740; border: 1px solid #2f3d5e;
+    border-bottom-width: 2px;
+    border-radius: 6px; padding: 2px 8px;
+    font-family: inherit; font-size: 12px; color: #dce6ff;
+  }
+</style>
+</head>
+<body>
+
+<div id="app"></div>
+<div id="crosshair"></div>
+<div id="hint"></div>
+
+<div id="overlay">
+  <div class="card">
+    <h1>📦 بازی جعبه</h1>
+    <p id="overlayStatus">برای شروع کلیک کن</p>
+    <div class="go">شروع بازی</div>
+    <div class="keys">
+      <kbd>W A S D</kbd> حرکت &nbsp;·&nbsp; <kbd>Space</kbd> پرش &nbsp;·&nbsp; <kbd>Shift</kbd> دویدن<br>
+      <kbd>E</kbd> برداشتن / گذاشتن &nbsp;·&nbsp; <kbd>R</kbd> <kbd>Q</kbd> چرخش &nbsp;·&nbsp; <kbd>کلیک راست</kbd> پرتاب
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+/* =========================================================
+   ۱) تنظیمات کلی بازی
+   ========================================================= */
+const CONFIG = {
+  // مدل
+  modelURL: './box.glb',   // مسیر فایل GLB شما (کنار همین HTML)
+  targetBoxSize: 0.7,      // بزرگ‌ترین ضلع جعبه بعد از نرمال‌سازی (برای هر مدلی)
+  boxCount: 8,             // تعداد جعبه‌های اولیه در صحنه
+
+  // بازیکن
+  eyeHeight: 1.7,
+  moveSpeed: 4.2,
+  sprintMul: 1.8,
+  jumpSpeed: 7.0,
+  gravity: 22,
+
+  // برداشتن / گذاشتن
+  pickRange: 3.6,          // حداکثر فاصله برای برداشتن
+  holdDistance: 1.6,       // فاصله‌ی جعبه از دوربین وقتی در دست است
+  holdSmooth: 16,          // نرمی حرکت جعبه به سمت دست
+  rotateSpeed: 2.6,        // سرعت چرخش جعبه با R/Q (رادیان بر ثانیه)
+  throwForce: 8.5,         // قدرت پرتاب
+  mouseSensitivity: 0.0022,
+};
+
+/* =========================================================
+   ۲) صحنه، دوربین، رندرر
+   ========================================================= */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x93b7dd);
+scene.fog = new THREE.Fog(0x93b7dd, 22, 70);
+
+const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.05, 250);
+camera.rotation.order = 'YXZ';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.getElementById('app').appendChild(renderer.domElement);
+
+/* ---------- نورپردازی ---------- */
+scene.add(new THREE.HemisphereLight(0xbcd6ff, 0x4a5568, 1.15));
+
+const sun = new THREE.DirectionalLight(0xfff2dd, 2.4);
+sun.position.set(7, 13, 8);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+const SH = 16;
+Object.assign(sun.shadow.camera, { left: -SH, right: SH, top: SH, bottom: -SH, near: 0.5, far: 60 });
+sun.shadow.bias = -0.0005;
+sun.shadow.normalBias = 0.02;
+scene.add(sun);
+
+/* ---------- زمین ---------- */
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(200, 200),
+  new THREE.MeshStandardMaterial({ color: 0x6f8f5e, roughness: 1, metalness: 0 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+const grid = new THREE.GridHelper(200, 200, 0x000000, 0x000000);
+grid.material.opacity = 0.07;
+grid.material.transparent = true;
+grid.position.y = 0.002;
+scene.add(grid);
+
+/* =========================================================
+   ۳) ابزارهای کمکی: خط‌چین دور جعبه‌ی هدف + شبح جای‌گذاری
+   ========================================================= */
+const unitEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
+
+// دور جعبه‌ای که به آن نگاه می‌کنیم
+const outline = new THREE.LineSegments(
+  unitEdges,
+  new THREE.LineBasicMaterial({ color: 0x4ade80, transparent: true, opacity: 0.95, depthTest: false })
+);
+outline.renderOrder = 998;
+outline.visible = false;
+scene.add(outline);
+
+// شبح سبز که نشان می‌دهد جعبه کجا گذاشته می‌شود
+const ghost = new THREE.LineSegments(
+  unitEdges,
+  new THREE.LineBasicMaterial({ color: 0x34d399, transparent: true, opacity: 0.85, depthTest: false })
+);
+ghost.renderOrder = 999;
+ghost.visible = false;
+scene.add(ghost);
+
+/* =========================================================
+   ۴) بارگذاری مدل GLB (با جعبه‌ی جایگزین در صورت نبود فایل)
+   ========================================================= */
+const boxes = [];          // همه‌ی جعبه‌های قابل‌برداشتن
+let held = null;           // جعبه‌ای که در دست است
+let heldYaw = 0;           // زاویه‌ی چرخش جعبه در دست
+let aimTarget = null;      // جعبه‌ای که روی آن نشانه رفته‌ایم
+let ghostPos = new THREE.Vector3();
+
+const overlayStatus = document.getElementById('overlayStatus');
+
+new GLTFLoader().load(
+  CONFIG.modelURL,
+  (gltf) => {
+    overlayStatus.textContent = 'مدل box.glb بارگذاری شد ✔ — برای شروع کلیک کن';
+    spawnAll(gltf.scene);
+  },
+  undefined,
+  (err) => {
+    console.warn('[GLB] بارگذاری نشد، از جعبه‌ی پیش‌فرض استفاده می‌شود:', err);
+    overlayStatus.textContent = 'فایل box.glb پیدا نشد — با جعبه‌ی پیش‌فرض اجرا می‌شود';
+    spawnAll(makeFallbackBox());
+  }
+);
+
+/* جعبه‌ی جایگزین در صورت نبود GLB */
+function makeFallbackBox() {
+  const g = new THREE.Group();
+
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(0.62, 0.62, 0.62),
+    new THREE.MeshStandardMaterial({ color: 0xc98a4b, roughness: 0.8, metalness: 0.03 })
+  );
+  g.add(body);
+
+  const frame = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(0.625, 0.625, 0.625)),
+    new THREE.LineBasicMaterial({ color: 0x7a4a1f })
+  );
+  g.add(frame);
+
+  return g;
+}
+
+/* آماده‌سازی قالب + ساخت نمونه‌ها */
+function spawnAll(template) {
+  template.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+      if (o.material && 'envMapIntensity' in o.material) o.material.envMapIntensity = 0.8;
+    }
+  });
+
+  // اندازه‌ی خام مدل
+  const rawBox = new THREE.Box3().setFromObject(template);
+  const rawSize = rawBox.getSize(new THREE.Vector3());
+  const rawCenter = rawBox.getCenter(new THREE.Vector3());
+
+  // نرمال‌سازی اندازه (تا با هر مدلی درست کار کند)
+  const maxDim = Math.max(rawSize.x, rawSize.y, rawSize.z) || 1;
+  const k = CONFIG.targetBoxSize ? CONFIG.targetBoxSize / maxDim : 1;
+
+  const finalSize = rawSize.clone().multiplyScalar(k);
+  const finalCenter = rawCenter.clone().multiplyScalar(k);
+
+  // چیدمان اولیه روی زمین
+  const spots = [
+    [-2.2, -2.2], [0, -2.4], [2.2, -2.2],
+    [-2.4, 0],               [2.4, 0],
+    [-2.2, 2.2],  [0, 2.4],  [2.2, 2.2],
+  ];
+
+  for (let i = 0; i < CONFIG.boxCount; i++) {
+    const wrapper = new THREE.Group();
+
+    const model = template.clone(true);
+    model.scale.setScalar(k);
+    model.position.copy(finalCenter).multiplyScalar(-1); // مرکز مدل روی مبدأ
+    wrapper.add(model);
+
+    const [x, z] = spots[i % spots.length];
+    wrapper.position.set(x, finalSize.y / 2, z);
+    wrapper.rotation.y = Math.random() * Math.PI * 2;
+
+    // داده‌های اختصاصی هر جعبه
+    wrapper.userData.size = finalSize.clone();
+    wrapper.userData.velocity = new THREE.Vector3();
+    wrapper.userData.pickable = true;
+
+    scene.add(wrapper);
+    boxes.push(wrapper);
+  }
+}
+
+/* =========================================================
+   ۵) کنترل بازیکن (First Person)
+   ========================================================= */
+const player = {
+  pos: new THREE.Vector3(0, CONFIG.eyeHeight, 6.5),
+  vel: new THREE.Vector3(),
+  yaw: 0,
+  pitch: 0,
+  onGround: true,
+};
+
+const keys = Object.create(null);
+let pointerLocked = false;
+const overlay = document.getElementById('overlay');
+const dom = renderer.domElement;
+
+overlay.addEventListener('click', () => dom.requestPointerLock());
+dom.addEventListener('click', () => { if (!pointerLocked) dom.requestPointerLock(); });
+
+document.addEventListener('pointerlockchange', () => {
+  pointerLocked = document.pointerLockElement === dom;
+  overlay.classList.toggle('hidden', pointerLocked);
+  if (!pointerLocked) {
+    // پاک کردن کلیدها تا بازیکن بی‌دلیل حرکت نکند
+    for (const k in keys) keys[k] = false;
+  }
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (!pointerLocked) return;
+  player.yaw   -= e.movementX * CONFIG.mouseSensitivity;
+  player.pitch -= e.movementY * CONFIG.mouseSensitivity;
+  player.pitch = THREE.MathUtils.clamp(player.pitch, -Math.PI / 2 + 0.06, Math.PI / 2 - 0.06);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') e.preventDefault();
+  if (e.repeat) return;
+  keys[e.code] = true;
+  if (!pointerLocked) return;
+  if (e.code === 'KeyE') togglePickup();
+});
+
+document.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+// پرتاب با کلیک راست
+dom.addEventListener('contextmenu', (e) => e.preventDefault());
+dom.addEventListener('mousedown', (e) => {
+  if (!pointerLocked) return;
+  if (e.button === 2 && held) dropHeld(true);
+});
+
+/* به‌روزرسانی حرکت بازیکن */
+const _fwd = new THREE.Vector3();
+const _right = new THREE.Vector3();
+const _wish = new THREE.Vector3();
+
+function updatePlayer(dt) {
+  // بردارهای جهت بر اساس yaw
+  _fwd.set(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
+  _right.set(Math.cos(player.yaw), 0, -Math.sin(player.yaw));
+
+  _wish.set(0, 0, 0);
+  if (keys.KeyW || keys.ArrowUp)    _wish.add(_fwd);
+  if (keys.KeyS || keys.ArrowDown)  _wish.sub(_fwd);
+  if (keys.KeyD || keys.ArrowRight) _wish.add(_right);
+  if (keys.KeyA || keys.ArrowLeft)  _wish.sub(_right);
+  if (_wish.lengthSq() > 0) _wish.normalize();
+
+  const sprinting = keys.ShiftLeft || keys.ShiftRight;
+  const speed = CONFIG.moveSpeed * (sprinting ? CONFIG.sprintMul : 1);
+
+  // نرم‌سازی سرعت افقی
+  player.vel.x = THREE.MathUtils.damp(player.vel.x, _wish.x * speed, 14, dt);
+  player.vel.z = THREE.MathUtils.damp(player.vel.z, _wish.z * speed, 14, dt);
+
+  // پرش و گرانش
+  if (keys.Space && player.onGround) {
+    player.vel.y = CONFIG.jumpSpeed;
+    player.onGround = false;
+  }
+  player.vel.y -= CONFIG.gravity * dt;
+
+  player.pos.addScaledVector(player.vel, dt);
+
+  // برخورد با زمین
+  if (player.pos.y <= CONFIG.eyeHeight) {
+    player.pos.y = CONFIG.eyeHeight;
+    player.vel.y = 0;
+    player.onGround = true;
+  }
+
+  // محدوده‌ی نقشه
+  const LIM = 60;
+  player.pos.x = THREE.MathUtils.clamp(player.pos.x, -LIM, LIM);
+  player.pos.z = THREE.MathUtils.clamp(player.pos.z, -LIM, LIM);
+
+  camera.position.copy(player.pos);
+  camera.rotation.set(player.pitch, player.yaw, 0);
+}
+
+/* =========================================================
+   ۶) مکانیزم برداشتن / گذاشتن
+   ========================================================= */
+const raycaster = new THREE.Raycaster();
+const SCREEN_CENTER = new THREE.Vector2(0, 0);
+const DOWN = new THREE.Vector3(0, -1, 0);
+
+/** از یک مِش، تا رسیدن به ریشه‌ی متصل به scene بالا می‌رویم */
+function findRoot(obj) {
+  let o = obj;
+  while (o && o.parent !== scene) o = o.parent;
+  return o;
+}
+
+/** پیدا کردن جعبه‌ای که وسط صفحه به آن نگاه می‌کند */
+function updateAim() {
+  if (held) {
+    aimTarget = null;
+    outline.visible = false;
+    return;
+  }
+
+  raycaster.setFromCamera(SCREEN_CENTER, camera);
+  raycaster.far = CONFIG.pickRange;
+
+  const hits = raycaster.intersectObjects(boxes, true);
+  let found = null;
+  for (const h of hits) {
+    const root = findRoot(h.object);
+    if (root && boxes.includes(root)) { found = root; break; }
+  }
+  aimTarget = found;
+
+  if (found) {
+    const s = found.userData.size;
+    outline.position.copy(found.position);
+    outline.quaternion.copy(found.quaternion);
+    outline.scale.set(s.x + 0.03, s.y + 0.03, s.z + 0.03);
+    outline.visible = true;
+  } else {
+    outline.visible = false;
+  }
+}
+
+/** برداشتن جعبه */
+function pickUp(obj) {
+  held = obj;
+  held.userData.velocity.set(0, 0, 0);
+  heldYaw = obj.rotation.y;
+  outline.visible = false;
+  ghost.visible = false;
+}
+
+/** محاسبه‌ی نقطه‌ی فرود: پایین‌ترین سطح زیر موقعیت فعلی جعبه */
+const _tmpDir = new THREE.Vector3();
+function computeDropPosition(out) {
+  camera.getWorldDirection(_tmpDir);
+  out.copy(camera.position).addScaledVector(_tmpDir, CONFIG.holdDistance);
+
+  // از بالا به پایین رِی می‌اندازیم تا سطح زیر را پیدا کنیم
+  const from = new THREE.Vector3(out.x, 40, out.z);
+  raycaster.set(from, DOWN);
+  raycaster.far = 200;
+
+  const targets = [ground, ...boxes];
+  const hits = raycaster.intersectObjects(targets, true);
+
+  let surfaceY = 0;
+  for (const h of hits) {
+    const root = findRoot(h.object);
+    if (root === held) continue;    // خود جعبه‌ی در دست را نادیده بگیر
+    surfaceY = h.point.y;
+    break;
+  }
+
+  out.y = surfaceY + held.userData.size.y / 2;
+  return out;
+}
+
+/** گذاشتن یا پرتاب کردن جعبه‌ی در دست */
+function dropHeld(throwIt = false) {
+  if (!held) return;
+  const obj = held;
+  held = null;
+
+  if (throwIt) {
+    // پرتاب در جهت نگاه
+    camera.getWorldDirection(_tmpDir);
+    obj.userData.velocity.copy(_tmpDir).multiplyScalar(CONFIG.throwForce);
+    obj.userData.velocity.y += 1.6;
+    obj.position.addScaledVector(_tmpDir, 0.25);
+  } else {
+    // گذاشتن دقیقاً روی نقطه‌ی پیش‌نمایش
+    obj.position.copy(ghostPos);
+    obj.rotation.y = heldYaw;
+    obj.userData.velocity.set(0, 0, 0);
+  }
+
+  ghost.visible = false;
+  updateHUD(true);
+}
+
+/** تعویض وضعیت با کلید E */
+function togglePickup() {
+  if (held) dropHeld(false);
+  else if (aimTarget) pickUp(aimTarget);
+}
+
+/** به‌روزرسانی موقعیت جعبه‌ی در دست */
+function updateHeld(dt) {
+  if (!held) return;
+
+  // چرخش با R / Q
+  if (keys.KeyR) heldYaw += CONFIG.rotateSpeed * dt;
+  if (keys.KeyQ) heldYaw -= CONFIG.rotateSpeed * dt;
+
+  camera.getWorldDirection(_tmpDir);
+  const target = _tmpDir.clone().multiplyScalar(CONFIG.holdDistance).add(camera.position);
+  target.y -= 0.12; // کمی پایین‌تر از خط دید
+
+  // نگذار جعبه داخل زمین برود
+  const halfH = held.userData.size.y / 2;
+  target.y = Math.max(target.y, halfH + 0.02);
+
+  const t = 1 - Math.exp(-CONFIG.holdSmooth * dt);
+  held.position.lerp(target, t);
+  held.rotation.y = heldYaw;
+}
+
+/** پیش‌نمایش محل گذاشتن */
+function updateDropPreview() {
+  if (!held) { ghost.visible = false; return; }
+
+  computeDropPosition(ghostPos);
+
+  const s = held.userData.size;
+  ghost.position.copy(ghostPos);
+  ghost.rotation.y = heldYaw;
+  ghost.scale.set(s.x, s.y, s.z);
+  ghost.visible = true;
+}
+
+/* =========================================================
+   ۷) فیزیک ساده‌ی جعبه‌های آزاد (گرانش + برخورد با زمین)
+   ========================================================= */
+function updatePhysics(dt) {
+  for (const b of boxes) {
+    if (b === held) continue;
+
+    const v = b.userData.velocity;
+    const halfH = b.userData.size.y / 2;
+
+    // اگر روی زمین ساکن است، کاری نکن
+    if (v.lengthSq() < 1e-6 && b.position.y <= halfH + 1e-3) continue;
+
+    v.y -= CONFIG.gravity * dt;
+    b.position.addScaledVector(v, dt);
+
+    if (b.position.y < halfH) {
+      b.position.y = halfH;
+      if (v.y < 0) {
+        v.y = -v.y * 0.16;                 // کمی کفش‌کردن
+        if (Math.abs(v.y) < 0.7) v.y = 0;
+      }
+      v.x *= 0.86;
+      v.z *= 0.86;
+      if (Math.abs(v.x) < 0.05) v.x = 0;
+      if (Math.abs(v.z) < 0.05) v.z = 0;
+    }
+
+    // مرزهای نقشه
+    const LIM = 60;
+    if (Math.abs(b.position.x) > LIM) { b.position.x = Math.sign(b.position.x) * LIM; v.x = 0; }
+    if (Math.abs(b.position.z) > LIM) { b.position.z = Math.sign(b.position.z) * LIM; v.z = 0; }
+  }
+}
+
+/* =========================================================
+   ۸) رابط کاربری (HUD)
+   ========================================================= */
+const crosshairEl = document.getElementById('crosshair');
+const hintEl = document.getElementById('hint');
+let lastState = '';
+
+function updateHUD(force = false) {
+  const state = held ? 'holding' : (aimTarget ? 'target' : 'idle');
+  if (state === lastState && !force) return;
+  lastState = state;
+
+  crosshairEl.className = state === 'idle' ? '' : state;
+
+  if (state === 'holding') {
+    hintEl.innerHTML = '<b>E</b> گذاشتن &nbsp;·&nbsp; <b>R</b> / <b>Q</b> چرخش &nbsp;·&nbsp; <b>کلیک راست</b> پرتاب';
+  } else if (state === 'target') {
+    hintEl.innerHTML = '<b>E</b> برداشتن';
+  } else {
+    hintEl.innerHTML = 'به یک جعبه نگاه کن و <b>E</b> بزن';
+  }
+}
+updateHUD(true);
+
+/* =========================================================
+   ۹) حلقه‌ی اصلی
+   ========================================================= */
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  updatePlayer(dt);
+  updateAim();
+  updateHeld(dt);
+  updateDropPreview();
+  updatePhysics(dt);
+  updateHUD();
+
+  renderer.render(scene, camera);
+}
+animate();
+
+/* ---------- ریسایز ---------- */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
